@@ -1,0 +1,503 @@
+import { ArrowRight, Crosshair, Factory, Pause, Play, RadioTower, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router'
+import { PageHead } from '@/app/PageHead'
+import { HourlyChart, ParetoChart } from '@/components/charts/MonitorCharts'
+import { Sparkline } from '@/components/charts/parts'
+import { ConnectedStrip } from '@/components/ConnectedStrip'
+import { Expandable, ExpandToggle } from '@/components/Expandable'
+import { LineStateLabel, oeeTone, pct, tyres, useMon, useSimStep } from '@/components/monitor'
+import { Badge, Button, Code, Meter, PageBody, Panel, Prov, Scope, Segmented, SeverityBadge, Stat, StateDot } from '@/components/ui'
+import { TYRE_RECORDS } from '@/domain/packs/tyreRecords'
+import { formatAgo, formatClock, inSentence } from '@/lib/format'
+import { cn } from '@/lib/utils'
+import { alarmsNow, downtimeEvents, escalationOf, fpyOf, formatReading, isActive, keyReadingOf, lineStateOf, machineOee, pareto, pastDays, productionDay, productionDayStart, productionHours, rangeOf, readingValue, shiftWindow } from '@/sim/monitoring'
+import { useApp } from '@/sim/store'
+import { BAND, nextStep, useLinePdm } from '@/components/pdm'
+import type { LinePdm, PdmCtx } from '@/sim/pdm'
+import { plantLabels, type PlantLabel } from '@/three/labels'
+import { PlantScene } from '@/three/PlantScene'
+
+const cardLink = 'inline-flex items-center gap-1 text-[13px] font-600 text-teal transition-colors hover:text-teal-hover'
+
+/** Parts within this many days of their predicted life count as due. */
+const DUE_DAYS = 14
+
+function KpiRow() {
+  const { pack, engine, user } = useMon()
+  const t = useSimStep(60)
+  const snap = useApp((s) => s.snapshot)
+  const k = useMemo(() => {
+    const w = shiftWindow(pack.shifts, t)
+    const shift = machineOee(engine, user, 'PRS-17', w.from, Math.max(w.from + 60, t))
+    const day = productionDay(engine, user, t)
+    const fpy = fpyOf(engine, user, day.start, Math.max(day.start + 60, t))
+    const week = pastDays(engine, user, t, 7).filter((d) => d.oee.planned > 0)
+    const hours = productionHours(engine, user, t)
+    const alarms = alarmsNow(pack, user, t).filter(isActive)
+    return { w, shift, day, fpy, week, hours, alarms }
+  }, [pack, engine, user, t])
+  const parts = useMemo(() => Object.entries(TYRE_RECORDS).flatMap(([id, r]) => r.parts.map((p) => ({ id, ...p }))).sort((a, b) => a.rulDays - b.rulDays), [])
+  if (!snap) return <div className="card h-[132px] animate-pulse" />
+  const running = pack.machines.filter((m) => snap.machines[m.id].running).length
+  const stopped = pack.machines.filter((m) => snap.machines[m.id].stop)
+  const gap = k.day.cured - k.day.planToNow
+  const crit = k.alarms.filter((a) => a.def.severity === 'critical').length
+  const major = k.alarms.filter((a) => a.def.severity === 'major').length
+  const due = parts.filter((p) => p.rulDays <= DUE_DAYS)
+  return (
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 min-[87.5rem]:grid-cols-6">
+      <Stat
+        label={`Line OEE, Shift ${k.w.shift}`}
+        value={pct(k.shift.oee)}
+        tone={oeeTone(k.shift.oee)}
+        sub={`A ${pct(k.shift.a, 0)} · P ${pct(k.shift.p, 0)} · Q ${pct(k.shift.q, 0)}`}
+        prov="computed"
+        spark={<Sparkline values={[...k.week.map((d) => d.oee.oee), k.shift.oee]} width={64} height={26} accent />}
+        hint="Measured at the curing presses, the line's constraint, with the line's first-pass yield. The trend is the last working days."
+      />
+      <Stat
+        label="Tyres cured today"
+        value={tyres(k.day.cured)}
+        sub={`Plan to now ${tyres(k.day.planToNow)}, ${gap >= 0 ? `${tyres(gap)} ahead` : `${tyres(-gap)} behind`}`}
+        tone={gap < -k.day.planToNow * 0.03 ? 'amber' : undefined}
+        prov="plc"
+        spark={<Sparkline values={k.hours.filter((h) => h.to - h.from >= 3599).map((h) => h.cured)} width={64} height={26} />}
+        hint={`Since the production day began at 06:00. The day's plan is ${tyres(k.day.plan)} tyres.`}
+      />
+      <Stat label="Open alarms" value={k.alarms.length} tone={crit ? 'red' : major ? 'amber' : undefined} sub={`${crit} critical, ${major} major, ${k.alarms.filter((a) => a.rt.status === 'acknowledged').length} acknowledged`} prov="model" />
+      <Stat label="First-pass yield" value={pct(k.fpy.fpy)} tone={k.fpy.fpy < 0.965 ? 'amber' : undefined} sub={`${k.fpy.fi.rejects} rejects at final inspection, ${k.fpy.xr.rejects} at X-ray`} prov="computed" />
+      <Stat label="Machines running" value={`${running} of ${pack.machines.length}`} tone={stopped.length > 1 ? 'amber' : undefined} sub={stopped.length ? `Stopped: ${stopped.map((m) => m.id).join(', ')}` : 'None stopped'} prov="plc" />
+      <Stat label={`Parts due in ${DUE_DAYS} days`} value={due.length} tone={due.some((p) => p.rulDays <= 7) ? 'amber' : undefined} sub={due[0] ? `Next: ${inSentence(due[0].part)}, ${due[0].id}, ${due[0].rulDays} days` : 'None'} prov="model" />
+    </div>
+  )
+}
+
+function SelectedCard({ id, onClose, pdm }: { id: string; onClose: () => void; pdm?: { line: LinePdm; ctx: PdmCtx } }) {
+  const { pack, engine, user } = useMon()
+  const m = useApp((s) => s.snapshot?.machines[id])
+  const t = useApp((s) => s.simT)
+  const navigate = useNavigate()
+  const def = pack.machines.find((x) => x.id === id)
+  const key = keyReadingOf(id)
+  const oee = useMemo(() => {
+    const w = shiftWindow(pack.shifts, Math.floor(t / 60) * 60)
+    return machineOee(engine, user, id, w.from, Math.max(w.from + 60, Math.floor(t / 60) * 60))
+  }, [pack, engine, user, id, t])
+  if (!def || !m) return null
+  const v = key ? readingValue(engine, user, id, key.ri, t, { phase: m.phase, sub: m.sub }) : 0
+  const state = key ? rangeOf(key.r, v) : 'ok'
+  const open = alarmsNow(pack, user, t).filter((a) => a.def.machine === id && isActive(a))
+  return (
+    <div className="card absolute right-4 bottom-4 w-[340px] animate-[eiq-rise_0.2s_ease-out] p-4 shadow-[var(--lift-3)]">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <Code className="text-ink-3">{def.id}</Code>
+          <div className="truncate text-[16px] leading-snug font-600 text-ink">{def.name}</div>
+        </div>
+        <button type="button" onClick={onClose} aria-label="Close" className="icon-btn" style={{ width: 28, height: 28 }}>
+          <X size={14} />
+        </button>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <LineStateLabel state={lineStateOf(m)} reason={m.stop?.reason} />
+        {open.length > 0 && <Badge tone={open.some((a) => a.def.severity === 'critical') ? 'red' : 'amber'}>{`${open.length} alarm${open.length > 1 ? 's' : ''} open`}</Badge>}
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        {key && (
+          <div className="pmetric">
+            <div className="pm-l truncate">{key.r.name}</div>
+            <div className="pm-v" data-tone={state === 'out' ? 'bad' : state === 'near' ? 'warn' : undefined}>
+              {formatReading(key.r, v)} <span className="text-[12px] font-500 text-ink-3">{key.r.unit}</span>
+            </div>
+          </div>
+        )}
+        <div className="pmetric">
+          <div className="pm-l">{def.kind === 'utility' ? 'Availability, shift' : 'OEE, this shift'}</div>
+          <div className="pm-v">{pct(oee.oee)}</div>
+        </div>
+      </div>
+      <div className="mt-2.5 truncate text-[13px] text-ink-2">{m.stop ? `Stopped since ${formatClock(m.stop.start)}: ${inSentence(m.stop.reason)}` : m.running ? `${m.stepLabel}, ${m.cycleElapsedMin.toFixed(0)} of ${def.cycleMin} min` : 'Between cycles'}</div>
+      {pdm && <HealthNote id={id} pdm={pdm} />}
+      <div className="mt-3 flex gap-2">
+        <Button variant="primary" size="sm" onClick={() => navigate(pdm ? `/predictive?m=${def.id}` : `/machines/${def.id}`)}>
+          {pdm ? 'Why, in detail' : 'Open machine'}
+        </Button>
+        <Button size="sm" onClick={() => navigate(`/devices/${def.device}`)}>
+          <RadioTower />
+          Gateway
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/** The AI's view of the selected machine, under its live readings when the twin shows health. */
+function HealthNote({ id, pdm }: { id: string; pdm: { line: LinePdm; ctx: PdmCtx } }) {
+  const h = pdm.line.list.find((x) => x.id === id)
+  if (!h) return null
+  return (
+    <div className="mt-3 rounded-[9px] border border-line bg-chrome px-3 py-2.5">
+      <div className="flex items-center justify-between gap-2 text-[12.5px]">
+        <span className="font-600 text-ink">AI health {Math.round(h.health)}</span>
+        <span className="font-600" style={{ color: BAND[h.band].text }}>
+          {BAND[h.band].word}
+        </span>
+      </div>
+      <div className="mt-1 line-clamp-2 text-[12.5px] leading-snug text-ink-2">{nextStep(h.top, h.rec, pdm.ctx)}</div>
+    </div>
+  )
+}
+
+/** Dot colours for the health legend over the dark viewport, matching the label dots. */
+const HEALTH_DOT = { act: 'var(--danger)', plan: 'var(--caution)', watch: 'var(--crosshair)', ok: 'var(--ok)' } as const
+
+/** Seconds the line tour spends on each machine. */
+const LINE_TOUR_SEC = 9
+
+function TwinCard() {
+  const { pack } = useMon()
+  const [selected, setSelected] = useState<string | null>(null)
+  const [focus, setFocus] = useState<string | null>(null)
+  const [touring, setTouring] = useState(false)
+  // The twin as a large popup: same scene, same tour and selection, so it opens at once.
+  const [full, setFull] = useState(false)
+  // What the labels show: each machine's key reading, or its AI health score (?labels=health opens it that way).
+  const [params] = useSearchParams()
+  const [labels, setLabels] = useState<'readings' | 'health'>(params.get('labels') === 'health' ? 'health' : 'readings')
+  const pdm = useLinePdm()
+  const healthSig = pdm.line.list.map((m) => `${m.id}:${Math.round(m.health)}:${m.band}`).join('|')
+  useEffect(() => {
+    if (labels !== 'health') {
+      plantLabels.override = null
+      return
+    }
+    const dot: Record<string, PlantLabel['dot']> = { act: 'alert', plan: 'watch', watch: 'idle', ok: 'run' }
+    const tone: Record<string, PlantLabel['tone']> = { act: 'out', plan: 'near', watch: '', ok: '' }
+    plantLabels.override = Object.fromEntries(pdm.line.list.map((m) => [m.id, { text: `Health ${Math.round(m.health)}`, tone: tone[m.band], dot: dot[m.band] }]))
+    return () => {
+      plantLabels.override = null
+    }
+    // healthSig changes only when a shown score or band does.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [labels, healthSig])
+  const closeFull = useCallback(() => setFull(false), [])
+  const navigate = useNavigate()
+  const select = useCallback((id: string) => {
+    setTouring(false)
+    setSelected(id)
+    setFocus(id)
+  }, [])
+  const openDevice = useCallback((id: string) => navigate(`/devices/${id}`), [navigate])
+  const order = useMemo(() => pack.machines.map((m) => m.id), [pack])
+  const at = selected ? order.indexOf(selected) : -1
+
+  // The line tour: fly to each machine in process order and show its live card.
+  useEffect(() => {
+    if (!touring) return
+    const next = order[(at + 1) % order.length]
+    const t = setTimeout(
+      () => {
+        setSelected(next)
+        setFocus(next)
+      },
+      at < 0 ? 300 : LINE_TOUR_SEC * 1000,
+    )
+    return () => clearTimeout(t)
+  }, [touring, at, order])
+
+  const stop = () => {
+    setTouring(false)
+    setFocus(null)
+    setSelected(null)
+  }
+  return (
+    <Expandable open={full} onClose={closeFull} label="Live line twin, full view" openClassName="flex flex-col">
+      <Panel
+        title="Live line twin"
+        description="Every machine with its state and the reading an operator watches first. Material moves between the stages while they run. Click a machine, or tour the line."
+        flush
+        className={full ? 'min-h-0 flex-1 shadow-[var(--lift-3)]' : undefined}
+        actions={
+          <>
+            <Segmented
+              label="Labels"
+              size="sm"
+              value={labels}
+              onChange={setLabels}
+              options={[
+                { value: 'readings', label: 'Readings' },
+                { value: 'health', label: 'AI health' },
+              ]}
+            />
+            <Button
+              size="sm"
+              variant={touring ? 'primary' : 'secondary'}
+              onClick={() => {
+                if (touring) stop()
+                else {
+                  setSelected(null)
+                  setTouring(true)
+                }
+              }}
+            >
+              {touring ? <Pause /> : <Play />}
+              {touring ? `Stop tour, ${at + 1} of ${order.length}` : 'Tour the line'}
+            </Button>
+            {focus && !touring && (
+              <Button size="sm" onClick={stop}>
+                <Crosshair />
+                Whole line
+              </Button>
+            )}
+          </>
+        }
+        bodyClassName={full ? 'relative min-h-0 flex-1 overflow-hidden rounded-b-[10px]' : 'relative h-[480px] flex-none overflow-hidden rounded-b-[10px]'}
+      >
+        <PlantScene key={pack.id} pack={pack} selected={selected} focus={focus} onSelect={select} onOpenDevice={openDevice} className="!absolute inset-0" />
+        {touring && at >= 0 && <div key={selected} className="absolute top-0 left-0 z-10 h-[3px] bg-[#2fb5a1]" style={{ animation: `tour-progress ${LINE_TOUR_SEC}s linear forwards` }} />}
+        <ExpandToggle open={full} onToggle={() => setFull((v) => !v)} />
+        {labels === 'health' && (
+          <div className="absolute bottom-4 left-4 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[9px] border border-white/10 bg-[#0b1220]/75 px-3 py-2 text-[12px] text-white/80 backdrop-blur-md">
+            <span className="font-600 text-white">AI health</span>
+            {(['act', 'plan', 'watch', 'ok'] as const).map((b) => (
+              <span key={b} className="inline-flex items-center gap-1.5">
+                <span className="size-2 rounded-full" style={{ background: HEALTH_DOT[b] }} />
+                {BAND[b].word}
+              </span>
+            ))}
+          </div>
+        )}
+        {selected && <SelectedCard id={selected} onClose={stop} pdm={labels === 'health' ? pdm : undefined} />}
+      </Panel>
+    </Expandable>
+  )
+}
+
+/** Every machine as a tile, in process order: state, key reading, step and OEE this shift. */
+function LineStrip() {
+  const { pack, engine, user } = useMon()
+  const snap = useApp((s) => s.snapshot)
+  const t = useApp((s) => s.simT)
+  const minute = useSimStep(60)
+  const navigate = useNavigate()
+  const oee = useMemo(() => {
+    const w = shiftWindow(pack.shifts, minute)
+    return Object.fromEntries(pack.machines.map((m) => [m.id, machineOee(engine, user, m.id, w.from, Math.max(w.from + 60, minute))]))
+  }, [pack, engine, user, minute])
+  if (!snap) return <div className="card h-[188px] animate-pulse" />
+  return (
+    <Panel
+      title="Line status"
+      description="In process order, mixing to final inspection, then the utilities. Click a machine to open it."
+      actions={
+        <Link to="/machines" className={cardLink}>
+          Line monitor
+          <ArrowRight size={14} />
+        </Link>
+      }
+    >
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 min-[90rem]:grid-cols-8">
+        {pack.machines.map((def) => {
+          const m = snap.machines[def.id]
+          const key = keyReadingOf(def.id)
+          const v = key ? readingValue(engine, user, def.id, key.ri, t, { phase: m.phase, sub: m.sub }) : 0
+          const st = key ? rangeOf(key.r, v) : 'ok'
+          const ls = lineStateOf(m)
+          const o = oee[def.id]
+          return (
+            <button
+              key={def.id}
+              type="button"
+              onClick={() => navigate(`/machines/${def.id}`)}
+              className="hit flex min-w-0 flex-col gap-1 rounded-[9px] border border-line bg-chrome px-3 py-2.5 text-left"
+              style={st !== 'ok' || ls === 'stopped' ? { borderColor: st === 'out' || ls === 'stopped' ? 'color-mix(in srgb, var(--danger) 45%, var(--line))' : 'color-mix(in srgb, var(--caution) 55%, var(--line))' } : undefined}
+              title={`${def.name}${m.stop ? `. Stopped: ${m.stop.reason}` : ''}`}
+            >
+              <span className="flex items-center gap-2">
+                <StateDot state={ls === 'offline' ? 'offline' : m.health === 'alert' ? 'alert' : ls === 'running' ? 'running' : 'idle'} />
+                <span className="ident text-[12.5px] font-600 whitespace-nowrap text-ink">{def.id}</span>
+                <span className="ml-auto shrink-0 text-[11.5px] text-ink-3 tnum" title={def.kind === 'utility' ? 'Availability this shift' : 'OEE this shift'}>
+                  {pct(o.oee, 0)}
+                </span>
+              </span>
+              <span className={cn('truncate text-[17px] leading-tight font-600 tnum', st === 'out' ? 'text-red' : st === 'near' ? 'text-amber-ink' : 'text-ink')}>
+                {ls === 'offline' ? 'Offline' : key ? formatReading(key.r, v) : ''}
+                {ls !== 'offline' && key?.r.unit && <span className="ml-1 text-[12px] font-500 text-ink-3">{key.r.unit}</span>}
+              </span>
+              <span className={cn('truncate text-[12px]', ls === 'stopped' ? 'text-red' : 'text-ink-3')}>{ls === 'stopped' ? m.stop!.reason : ls === 'running' ? m.stepLabel : 'Between cycles'}</span>
+            </button>
+          )
+        })}
+      </div>
+    </Panel>
+  )
+}
+
+function AlarmsCard() {
+  const { pack, user } = useMon()
+  const t = useSimStep(30)
+  const navigate = useNavigate()
+  const open = alarmsNow(pack, user, t).filter(isActive)
+  return (
+    <Panel
+      title="Active alarms"
+      description={`${open.length} active, most severe first`}
+      flush
+      actions={
+        <Link to="/alerts" className={cardLink}>
+          All alarms
+          <ArrowRight size={14} />
+        </Link>
+      }
+    >
+      <div>
+        {open.slice(0, 5).map(({ def: a, rt }) => {
+          const esc = escalationOf(a, rt, t)
+          const sent = esc.filter((e) => e.state === 'sent')
+          const due = esc.find((e) => e.state === 'due')
+          return (
+            <button key={a.id} type="button" onClick={() => navigate(`/alerts?open=${a.id}`)} className="hit block w-full border-b border-line px-[18px] py-[11px] text-left last:border-b-0">
+              <span className="flex items-center gap-2">
+                <SeverityBadge severity={a.severity} />
+                <span className="text-[12.5px] text-ink-3">{formatAgo((t - rt.raisedAt) / 60)}</span>
+                <Code className="ml-auto text-ink-3">{a.machine}</Code>
+              </span>
+              <span className="mt-[5px] block text-[14px] leading-snug font-600 text-ink">{a.title}</span>
+              <span className="mt-[2px] block truncate text-[12.5px] text-ink-3">
+                {rt.status === 'acknowledged' ? `Acknowledged${rt.owner ? ` by ${rt.owner.toLowerCase()}` : ''}` : `Told: ${sent.map((e) => e.level.who.toLowerCase()).join(', ')}`}
+                {rt.status !== 'acknowledged' && due ? `. ${due.level.who} at ${formatClock(due.at)}` : ''}
+              </span>
+            </button>
+          )
+        })}
+      </div>
+    </Panel>
+  )
+}
+
+function ShiftsCard() {
+  const { engine, user } = useMon()
+  const t = useSimStep(60)
+  const day = useMemo(() => productionDay(engine, user, t), [engine, user, t])
+  const hours = useMemo(() => productionHours(engine, user, t), [engine, user, t])
+  const nowH = Math.floor(t / 3600)
+  return (
+    <Panel title="Production by shift" description="Cured tyres against plan, from 06:00" actions={<Prov k="plc" compact />}>
+      <div className="flex flex-col gap-4">
+        {day.shifts.map((s) => {
+          const share = s.planToNow ? s.cured / s.planToNow : 0
+          const gap = s.cured - s.planToNow
+          return (
+            <div key={s.shift}>
+              <div className="flex items-baseline justify-between gap-3 text-[13.5px]">
+                <span className={cn('min-w-0 truncate', s.state === 'running' ? 'font-600 text-teal' : 'text-ink-2')}>
+                  Shift {s.shift}
+                  <span className="ml-2 text-[12.5px] font-400 text-ink-3">
+                    {formatClock(s.from)} to {formatClock(s.to)}
+                    {s.state === 'running' ? ', now' : ''}
+                  </span>
+                </span>
+                <span className="shrink-0 tnum">
+                  {s.state === 'next' ? (
+                    <span className="text-ink-3">Plan {tyres(s.plan)}</span>
+                  ) : (
+                    <>
+                      <span className="font-600 text-ink">{tyres(s.cured)}</span>
+                      <span className="ml-1.5 text-ink-3">of {tyres(s.plan)}</span>
+                    </>
+                  )}
+                </span>
+              </div>
+              <Meter className="mt-[6px]" value={s.cured} max={s.plan} marker={s.state === 'running' ? s.planToNow : undefined} tone={s.state === 'next' ? 'neutral' : share < 0.97 ? 'amber' : 'teal'} label={`Shift ${s.shift} against plan`} />
+              {s.state !== 'next' && (
+                <div className="mt-1.5 text-[12.5px] text-ink-3 tnum">
+                  OEE {pct(s.oee.oee)} · A {pct(s.oee.a, 0)} · P {pct(s.oee.p, 0)} · Q {pct(s.oee.q, 0)}
+                  <span className="block">{s.state === 'running' ? `${tyres(s.planToNow)} planned to now, ${gap >= 0 ? `${tyres(gap)} ahead` : `${tyres(-gap)} behind`}` : `${pct(share, 0)} of plan`}</span>
+                </div>
+              )}
+            </div>
+          )
+        })}
+        <div className="border-t border-line pt-3">
+          <div className="mb-2 flex items-baseline justify-between text-[13.5px]">
+            <span className="text-ink-2">Day so far</span>
+            <span className="tnum">
+              <span className="font-600 text-ink">{tyres(day.cured)}</span>
+              <span className="ml-1.5 text-ink-3">of {tyres(day.plan)}</span>
+            </span>
+          </div>
+          <HourlyChart data={hours.map((h) => ({ label: formatClock(h.from).slice(0, 2), cured: h.cured, plan: h.plan, now: h.h === nowH }))} height={120} legend={false} />
+        </div>
+      </div>
+    </Panel>
+  )
+}
+
+function DowntimeCard() {
+  const { pack, engine } = useMon()
+  const t = useSimStep(60)
+  const rows = useMemo(() => {
+    const events = downtimeEvents(engine, productionDayStart(pack.shifts, t), t)
+    return { top: pareto(events, 'reason').slice(0, 8), total: events.reduce((a, e) => a + e.minutes, 0), n: events.length }
+  }, [pack, engine, t])
+  return (
+    <Panel
+      title="Downtime today"
+      description={`${Math.round(rows.total)} min over ${rows.n} stops since 06:00, largest reason first`}
+      actions={
+        <Link to="/production" className={cardLink}>
+          Production and OEE
+          <ArrowRight size={14} />
+        </Link>
+      }
+    >
+      <ParetoChart data={rows.top.map((r) => ({ key: r.key, label: r.label, sub: r.machine, minutes: r.minutes, cum: r.cum }))} height={190} />
+      <ol className="mt-3 flex flex-col gap-[5px]">
+        {rows.top.slice(0, 4).map((r, i) => (
+          <li key={r.key} className="flex items-baseline gap-2 text-[13px]">
+            <span className="w-4 shrink-0 text-ink-3 tnum">{i + 1}.</span>
+            <Code className="shrink-0 text-ink-3">{r.machine}</Code>
+            <span className="min-w-0 flex-1 truncate text-ink-2">{r.label}</span>
+            <span className="shrink-0 font-600 text-ink tnum">{Math.round(r.minutes)} min</span>
+          </li>
+        ))}
+      </ol>
+    </Panel>
+  )
+}
+
+/** The scope chip ticks with the clock, so it subscribes on its own and the page does not re-render. */
+function RoomScope() {
+  const { pack } = useMon()
+  const minute = useSimStep(60)
+  const shift = useApp((s) => s.snapshot?.plant.shift ?? 'B')
+  return (
+    <Scope icon={<Factory size={14} className="shrink-0" />} note={`Shift ${shift}, ${formatClock(minute)}`}>
+      <span className="font-600">{pack.plant.name}</span>
+      <span className="text-ink-3">{pack.plant.site}</span>
+      <span className="text-ink-3">{pack.plant.city}</span>
+    </Scope>
+  )
+}
+
+export default function ControlRoom() {
+  const { pack } = useMon()
+  return (
+    <>
+      <PageHead eyebrow="Monitor" title="Control room" scope={<RoomScope />} description={`${pack.plant.product}. The whole line live: every machine’s state and key reading, OEE, output against plan, alarms and quality.`} />
+      <PageBody>
+        <KpiRow />
+        <TwinCard />
+        <LineStrip />
+        <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-2 min-[90rem]:grid-cols-3">
+          <AlarmsCard />
+          <ShiftsCard />
+          <DowntimeCard />
+        </div>
+        <ConnectedStrip ids={['CN-GW', 'CN-PLC', 'CN-SENS', 'CN-MES', 'CN-HIST']} />
+      </PageBody>
+    </>
+  )
+}
+

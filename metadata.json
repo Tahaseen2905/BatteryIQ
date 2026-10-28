@@ -1,0 +1,5 @@
+{
+  "name": "BatteryIQ",
+  "description": "Exide-inspired vehicle battery plant: four AI vision inspection gates, SPC, review and hold bay, tracing, line monitoring and predictive maintenance.",
+  "requestFramePermissions": []
+}
