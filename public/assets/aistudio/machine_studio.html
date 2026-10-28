@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BatteryIQ machine studio</title>
+<style>
+:root {
+  --bg: #111925;
+  --card: #1f2937;
+  --tx: #f1efe8;
+  --tx2: #b4b2a9;
+  --bd: #374151;
+  --ac: #10b981;
+}
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+}
+#stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(#27384f, #111925);
+  touch-action: none;
+  overflow: hidden;
+}
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+#lab {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.chip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: auto;
+  cursor: pointer;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.95);
+  color: #1f2937;
+  border-radius: 8px;
+  padding: 3px 8px;
+  font: 11.5px/1.3 ui-monospace, Menlo, Consolas, monospace;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  will-change: transform;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  transition: transform 0.15s ease, outline 0.15s ease;
+}
+.chip:hover {
+  transform: translate(-50%, -100%) scale(1.05);
+}
+.chip i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.chip .t {
+  font-weight: 700;
+  color: #111827;
+}
+.chip .v {
+  color: #4b5563;
+  font-weight: 500;
+}
+.chip .v.s {
+  color: #d92d20;
+  font-weight: 700;
+}
+.chip.sel {
+  outline: 2.5px solid #10b981;
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.6);
+  z-index: 10;
+}
+.zone {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  color: rgba(205, 218, 238, 0.55);
+  font: italic 12px system-ui, -apple-system, sans-serif;
+  white-space: nowrap;
+  letter-spacing: 0.03em;
+}
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="cv"></canvas>
+  <div id="lab"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="/assets/studio/parts.js"></script>
+<script src="/assets/studio/machines.js"></script>
+<script>
+const $ = s => document.querySelector(s), V3 = (x, y, z) => new THREE.Vector3(x, y, z);
+const stg = $('#stage'), lab = $('#lab');
+const R = new THREE.WebGLRenderer({ canvas: $('#cv'), antialias: true, alpha: true });
+R.setPixelRatio(Math.min(devicePixelRatio || 1, 1.75));
+R.shadowMap.enabled = true;
+R.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const S = new THREE.Scene(), cam = new THREE.PerspectiveCamera(40, 1, 0.1, 400);
+const OC = new THREE.OrbitControls(cam, $('#cv'));
+OC.enableDamping = true;
+OC.maxPolarAngle = 1.45;
+OC.minDistance = 4;
+OC.maxDistance = 120;
+OC.autoRotate = true;
+OC.autoRotateSpeed = 0.5;
+
+S.add(new THREE.HemisphereLight(0xdfe8ff, 0x223044, 0.55));
+const ec = [0, 1, 2, 3, 4, 5].map(k => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 32;
+  const x = c.getContext('2d'), q = x.createLinearGradient(0, 0, 0, 32);
+  q.addColorStop(0, k == 2 ? '#dbe7ff' : '#8da2bf');
+  q.addColorStop(1, k == 3 ? '#202a38' : '#3a4658');
+  x.fillStyle = q;
+  x.fillRect(0, 0, 32, 32);
+  return c;
+});
+const et = new THREE.CubeTexture(ec);
+et.needsUpdate = true;
+S.environment = et;
+
+const dl = new THREE.DirectionalLight(0xffffff, 1);
+dl.position.set(20, 40, 25);
+S.add(dl);
+dl.castShadow = true;
+dl.shadow.mapSize.set(2048, 2048);
+const sc = dl.shadow.camera;
+sc.left = -65; sc.right = 65; sc.top = 50; sc.bottom = -50; sc.near = 1; sc.far = 140;
+dl.shadow.bias = -0.0006;
+
+const ST = 0xaab4c0, BL = 0x2f6fd6, OR = 0xe08a2e, DK = 0x2b3340, TL = 0x20a58a, PU = 0x7a6ad8, WH = 0xe9eef3, RD = 0xd9473f, GY = 0x5d6673;
+const MT = {}, mat = c => MT[c] || (MT[c] = new THREE.MeshStandardMaterial({ color: c, roughness: 0.45, metalness: 0.4 }));
+const PICK = [];
+let cur = -1;
+
+function reg(m, g) {
+  g.add(m);
+  m.castShadow = !(m.material && m.material.transparent);
+  m.receiveShadow = true;
+  if (cur >= 0) {
+    m.userData.i = cur;
+    PICK.push(m);
+  }
+  return m;
+}
+
+function B(g, w, h, d, x, y, z, c, o) {
+  const m = new THREE.Mesh(
+    new THREE.BoxGeometry(w, h, d),
+    o ? new THREE.MeshStandardMaterial({ color: c, transparent: true, opacity: o, roughness: 0.3 }) : mat(c)
+  );
+  m.position.set(x, y + h / 2, z);
+  return reg(m, g);
+}
+
+function C(g, r, h, x, y, z, c) {
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 20), mat(c));
+  m.position.set(x, y + h / 2, z);
+  return reg(m, g);
+}
+
+const D = [
+  { id: 'GC-01', n: 'Grid casting', x: -24, z: -10, h: 9, s: 'ok', hp: 95, rs: 1, d: 'Molten lead alloy is cast into battery grids in a book mould.', t: [['Pot temperature', 480, 3, '°C', 0], ['Mould temperature', 185, 2, '°C', 0], ['Cycle time', 8.2, 0.2, 's', 1]], b: g => { B(g, 6, 1, 6, 0, 0, 0, ST); C(g, 1.9, 6, 0, 1, 0, BL); C(g, 0.6, 1.6, 0, 7, 0, DK); C(g, 1.1, 3.2, 4.2, 0, 1.8, OR); } },
+  { id: 'OM-01', n: 'Lead oxide mill', x: -12, z: -10, h: 8.6, s: 'ok', hp: 93, rs: 1.9, d: 'Lead is tumbled into fine lead oxide powder in a Barton pot.', t: [['Pot temperature', 165, 3, '°C', 0], ['Airflow', 420, 10, 'm³/h', 0], ['Oxidation', 74, 0.6, '%', 1]], b: g => { B(g, 13, 1, 4.4, 0, 0, 0, DK); B(g, 8, 3.2, 3.6, 1.5, 1, 0, BL, 0.7); B(g, 11, 0.06, 2.2, 0.5, 2.6, 0, 0xd8dde3); [0, 1, 2, 3].forEach(i => B(g, 1.8, 0.3, 3.2, -0.2 + i * 2, 4.2, 0, [0xf4c873, 0xee9b4a, 0xe5703a, 0xee9b4a][i])); C(g, 1.3, 3, -5, 1, 0, ST); C(g, 1, 3, 6, 1, 0, ST); C(g, 0.4, 2.2, 0.5, 4.5, 0, ST); C(g, 0.4, 2.2, 4.5, 4.5, 0, ST); } },
+  { id: 'PM-01', n: 'Paste mixing', x: -1, z: -10, h: 9, s: 'ok', hp: 91, rs: 1, d: 'Oxide, water and sulphuric acid are mixed into active paste.', t: [['Paste density', 4.15, 0.04, 'g/cm³', 2], ['Mix temperature', 38, 1.2, '°C', 1], ['Acid addition', 12, 0.3, 'L/min', 1]], b: g => { B(g, 5.5, 1, 4, 0, 0, 0, ST); B(g, 0.7, 5, 3, -2, 1, 0, DK); B(g, 0.7, 5, 3, 2, 1, 0, DK); B(g, 3.4, 1, 2.6, 0, 2.2, 0, ST); B(g, 3.4, 1, 2.6, 0, 4.2, 0, 0xc7ced6); B(g, 4.6, 0.5, 3, 0, 6, 0, DK); C(g, 0.5, 1.3, 0, 6.5, 0, OR); } },
+  { id: 'PP-01', n: 'Pasting and parting', x: 7, z: -10, h: 5.6, s: 'ok', hp: 90, rs: 1, d: 'Paste is pressed onto grids on a belt, then the plates are cut apart.', t: [['Paste weight', 142, 1.5, 'g', 1], ['Plate thickness', 1.7, 0.03, 'mm', 2], ['Belt speed', 22, 0.4, 'm/min', 1]], b: g => { B(g, 6, 1.2, 4.4, 0, 0, 0, ST); [-2.1, -0.7, 0.7, 2.1].forEach(x => C(g, 0.6, 1.4, x, 1.2, 0, BL)); B(g, 5.4, 0.4, 0.4, 0, 2.7, -1.5, DK); } },
+  { id: 'CC-01', n: 'Curing and drying', x: 15, z: -10, h: 7.6, s: 'ok', hp: 94, rs: 1, d: 'Pasted plates cure in humid chambers, then dry.', t: [['Humidity', 96, 1.2, '%RH', 0], ['Chamber temperature', 58, 1, '°C', 0], ['Cure time', 36, 0, 'h', 0]], b: g => { B(g, 6, 5, 4.4, 0, 0, 0, WH); B(g, 3.6, 3.2, 0.25, 0, 0.9, 2.25, DK); B(g, 0.4, 0.4, 0.4, 2.2, 4.1, 2.25, 0x5bd16b); B(g, 0.4, 0.4, 0.4, 1.6, 4.1, 2.25, 0xf4c873); } },
+  { id: 'CS-01', n: 'Cast-on-strap', x: 18, z: 4, h: 8, s: 'ok', hp: 92, rs: 1, d: 'Plate groups are joined into cells with a cast lead strap.', t: [['Strap mould temp', 215, 2, '°C', 0], ['Pour time', 3.2, 0.1, 's', 1], ['Lug penetration', 2.1, 0.1, 'mm', 1]], b: g => { B(g, 6, 1.4, 4.4, 0, 0, 0, ST); B(g, 1.6, 1.2, 1.6, 0, 1.4, 0, WH); B(g, 0.4, 4.2, 0.4, -2.6, 1.4, 1.8, DK); B(g, 0.4, 4.2, 0.4, 2.6, 1.4, 1.8, DK); B(g, 5.6, 0.6, 0.6, 0, 5.6, 1.8, OR); B(g, 0.7, 1.2, 0.7, 0, 4.4, 1.8, ST); } },
+  { id: 'IW-01', n: 'Inter-cell welding', x: 10, z: 4, h: 8, s: 'ok', hp: 92, rs: 1, d: 'Cells are welded through the container partitions.', t: [['Weld force', 12.4, 0.3, 'kN', 1], ['Weld time', 0.42, 0.02, 's', 2], ['Shear strength', 148, 3, 'N', 0]], b: g => { B(g, 6, 1.6, 4.4, 0, 0, 0, ST); B(g, 4.4, 3.2, 3.2, 0, 1.6, 0, WH, 0.55); B(g, 1.1, 1.2, 1.1, 0, 4.8, 0, DK); B(g, 0.4, 0.9, 0.4, 2.4, 4.8, 1.2, OR); } },
+  { id: 'HS-01', n: 'Cover heat sealing', x: 2, z: 4, h: 8.6, s: 'warn', hp: 74, rs: 1, d: 'A heated platen fuses the cover to the container.', note: 'Platen 2 running cold; seal bead breaks.', t: [['Platen 2 temperature', 352, 3, '°C', 0], ['Melt depth', 2.4, 0.1, 'mm', 1], ['Pressure', 5.2, 0.1, 'bar', 1]], b: g => { B(g, 6, 1.4, 4.4, 0, 0, 0, ST); B(g, 4.8, 3.6, 3.4, 0, 1.4, 0, WH, 0.55); [-1.2, 0, 1.2].forEach(x => B(g, 0.28, 1.6, 0.28, x, 5, 0, TL)); } },
+  { id: 'AF-01', n: 'Acid filling', x: -8, z: 4, h: 10, s: 'ok', hp: 91, rs: 1, d: 'Vacuum filler doses sulphuric acid into all six cells.', t: [['Acid density', 1.28, 0.002, 'g/cm³', 3], ['Fill vacuum', -85, 1.5, 'kPa', 1], ['Fill time', 22, 0.5, 's', 1]], b: g => { B(g, 7, 8, 3, 0, 0, 0, PU); const im = new THREE.InstancedMesh(new THREE.BoxGeometry(0.32, 0.32, 0.12), new THREE.MeshBasicMaterial(), 96), dm = new THREE.Object3D(), cc = new THREE.Color(); for (let r = 0; r < 8; r++) for (let c = 0; c < 12; c++) { const k = r * 12 + c; dm.position.set(-3.08 + c * 0.56, 1 + r * 0.9, 1.55); dm.updateMatrix(); im.setMatrixAt(k, dm.matrix); im.setColorAt(k, cc.set(k === 5 * 12 + 7 ? 0xe24b4a : 0x4cd06a)); } reg(im, g); } },
+  { id: 'FB-01', n: 'Formation bath', x: -19, z: 4, h: 6, s: 'ok', hp: 87, rs: 1, d: 'Batteries are charged in water-cooled baths to form the plates.', t: [['Bath temperature', 38, 1, '°C', 0], ['Charge current', 64.8, 0.5, 'A', 1], ['Coolant return', 37.2, 0.4, '°C', 1]], b: g => { B(g, 7, 0.9, 2.4, 0, 0, 0, DK); B(g, 0.3, 3, 0.3, 0, 0.9, -1.2, ST); B(g, 0.3, 3, 0.3, 0, 0.9, 1.2, ST); B(g, 0.3, 0.4, 2.7, 0, 3.9, 0, ST); B(g, 0.6, 0.8, 0.8, 0, 3.1, 0, OR); [[-2.2, TL], [0, OR], [2.2, RD]].forEach(a => B(g, 1.3, 1.2, 1.3, a[0], 0, 2.5, a[1])); [-2.6, -1.6, -0.6, 0.4, 1.4, 2.4].forEach(x => C(g, 0.3, 0.8, x, 0.9, 0, TL)); } },
+  { id: 'SC-01', n: 'Acid fume scrubber', x: -16, z: 16, h: 7, s: 'ok', hp: 91, rs: 0.8, u: 1, d: 'Washes acid fumes out of the formation and filling rooms.', t: [['Scrubber pH', 7.2, 0.1, '', 1], ['Fan flow', 3200, 40, 'm³/h', 0]], b: g => { B(g, 4.4, 5, 3.4, 0, 0, 0, WH); [-1.1, 1.1].forEach(x => C(g, 0.9, 0.25, x, 5, 0, DK)); } },
+  { id: 'CH-01', n: 'Chiller', x: -4, z: 16, h: 5.6, s: 'ok', hp: 93, rs: 0.8, u: 1, d: 'Chilled water supply for coating ovens and mixing jackets.', t: [['Supply temp', 7.2, 0.2, '°C', 1], ['Flow', 38, 1, 'm³/h', 0]], b: g => { B(g, 5.4, 3, 3.4, 0, 0, 0, BL); [-1.4, 1.4].forEach(x => C(g, 1.15, 0.25, x, 3, 0, DK)); } },
+  { id: 'ET-01', n: 'Effluent treatment', x: 8, z: 16, h: 8.6, s: 'ok', hp: 89, rs: 0.8, u: 1, d: 'Neutralises acid water before discharge.', t: [['Effluent pH', 7.0, 0.1, '', 1], ['Flow', 4.2, 0.2, 'm³/h', 1]], b: g => { C(g, 1.4, 6.5, -1.6, 0, 0, ST); C(g, 1.4, 6.5, 1.6, 0, 0, ST); B(g, 3.2, 0.4, 0.4, 0, 5.5, 0, OR); } },
+  { id: 'AC-01', n: 'Compressed air', x: 20, z: 16, h: 5.6, s: 'ok', hp: 95, rs: 0.8, u: 1, d: 'Dry pneumatic supply for plant actuators.', t: [['Pressure', 6.5, 0.1, 'bar', 2], ['Air dew point', -40, 1, '°C', 0]], b: g => { B(g, 4, 2.6, 3, -0.8, 0, 0, TL); C(g, 1.1, 3.4, 2.3, 0, 0, 0x6b7280); } }
+];
+
+const YL = 0xf2c230, GL = 0x9fd4ee, BU = 0x1f5fbf, MB = 0x1d4ea8;
+function HC(g, r, l, x, y, z, c, ax) {
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, l, 20), mat(c));
+  if (ax == 'x') m.rotation.z = 1.5708; else m.rotation.x = 1.5708;
+  m.position.set(x, y + r, z);
+  return reg(m, g);
+}
+function rail(g, w, d, x, y, z, h) {
+  [[w, 0.1, 0.1, x, y + h, z - d / 2], [w, 0.1, 0.1, x, y + h, z + d / 2], [0.1, 0.1, d, x - w / 2, y + h, z], [0.1, 0.1, d, x + w / 2, y + h, z]].forEach(a => B(g, a[0], a[1], a[2], a[3], a[4], a[5], YL));
+  [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(a => B(g, 0.1, h, 0.1, x + a[0] * w / 2, y, z + a[1] * d / 2, YL));
+}
+function motor(g, x, y, z, ax) {
+  HC(g, 0.5, 1.5, x, y, z, MB, ax);
+  B(g, 0.5, 0.35, 0.5, x, y + 1, z, 0x16397a);
+}
+
+// Add visual quality inspection gates (Q1 - Q4)
+function sign(g, t) {
+  const c = document.createElement('canvas');
+  c.width = 128; c.height = 64;
+  const x = c.getContext('2d');
+  x.fillStyle = '#14b8a6'; x.fillRect(0, 0, 128, 64);
+  x.fillStyle = '#ffffff'; x.font = 'bold 40px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.fillText(t, 64, 34);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c) }));
+  s.scale.set(2.4, 1.2, 1);
+  s.position.set(0, 5.6, 0);
+  g.add(s);
+}
+
+function gate(g, s, k) {
+  g.scale.set(1.25, 1.25, 1.25);
+  sign(g, 'Q' + (k + 1));
+  const c = s.s == 'ok' ? 0x2ecc71 : 0xf5a623;
+  [-1.35, 1.35].forEach(z => B(g, 0.35, 3.4, 0.35, 0, 0.3, z, 0x14b8a6));
+  B(g, 0.4, 0.4, 3.05, 0, 3.7, 0, 0x14b8a6);
+  B(g, 0.9, 0.7, 1, 0, 3, 0, 0x2b3340);
+  B(g, 0.35, 0.35, 0.35, 0, 4.1, 0, c);
+}
+
+[
+  ['QC-01', 'Casing inspection', 25.5, 6.5, 'ok', 97, 'Checks casings right after moulding as they enter assembly.', [['First-pass rate', 99.1, 0.15, '%', 1]]],
+  ['QC-02', 'Terminal inspection', 6, 6.5, 'ok', 95, 'Checks terminal position, alignment and weld defects.', [['First-pass rate', 99.1, 0.15, '%', 1]]],
+  ['QC-03', 'Cover & seal inspection', -32, 6.5, 'warn', 71, 'Looks at cover placement, gaps, and sealant beads.', [['First-pass rate', 97.1, 0.3, '%', 1]]],
+  ['QC-04', 'Label & code inspection', -42, 6.5, 'ok', 98, 'Verifies barcode, datamatrix OCR, and pack labels.', [['First-pass rate', 99.3, 0.1, '%', 1]]]
+].forEach((a, k) => D.push({ id: a[0], n: a[1], x: a[2], z: 4, h: a[3], s: a[4], hp: a[5], rs: 0.3, q: 1, d: a[6], t: a[7], b: g => gate(g, D[14 + k], k) }));
+
+// Additional mechanical stations
+[['MO-01', 'Casing moulding', 31, 4, 6.5, 93, 'Forms battery casings.', [['Clamp force', 800, 10, 'kN', 0]], g => { B(g, 8, 1, 3.4, 0, 0, 0, 0x4b5563); B(g, 1.2, 2.2, 1.8, -1.2, 1.4, 0, 0x6b7a8c); }],
+ ['CF-01', 'Cover fitting and sealing', -27, 4, 7, 95, 'Seals covers onto casings.', [['Press force', 12, 0.3, 'kN', 1]], g => { B(g, 6, 0.9, 4.4, 0, 0, 0, 0x4b5563); B(g, 2.6, 0.5, 2.4, 0, 0.9, 0, 0xaab4c0); }],
+ ['LB-01', 'Label, barcode & packing', -37, 4, 7, 92, 'Laser prints code and packs.', [['Labels/min', 36, 1, '/min', 0]], g => { B(g, 6, 0.9, 4.4, 0, 0, 0, 0x4b5563); B(g, 2.2, 1.8, 1.6, 0, 0.9, -1.4, 0xdfe5ea); }]
+].forEach(a => D.push({ id: a[0], n: a[1], x: a[2], z: a[3], h: a[4], s: 'ok', hp: a[5], rs: 1, d: a[6], t: a[7], b: a[8] }));
+
+
+// ---------- machine studio ----------
+D.push({ id: 'HR-01', n: 'High-rate discharge and terminal burner', x: 0, z: 0, h: 7.4, s: 'ok', hp: 93, rs: 1, d: 'Each battery is discharged at a very high current to prove it, then its terminals are burned clean.', t: [['Discharge voltage', 10.4, 0.1, 'V', 1]], b: g => { B(g, 6.4, 1, 4.2, 0, 0, 0, DK); B(g, 5.2, 4.6, 3.4, 0, 1, 0, WH, 0.6); B(g, 3.2, 1.1, 0.2, 0, 3.4, 1.75, DK); [-1.7, 1.7].forEach(x => { B(g, 0.7, 1.3, 0.7, x, 5.6, 0, ST); B(g, 0.28, 1.0, 0.28, x, 6.9, 0, RD); }); B(g, 5.6, 0.3, 3.8, 0, 5.4, 0, DK); } });
+const qs = new URLSearchParams(location.search);
+const sd = D.find(x => x.id === qs.get('m')) || D[0];
+const SCOL = { ok: '#1d9e75', warn: '#ef9f27', stop: '#e24b4a' };
+const grp = new THREE.Group();
+cur = -1;
+if (window.P && P.models[sd.id]) P.models[sd.id](grp); else sd.b(grp);
+S.add(grp);
+const bb = new THREE.Box3().setFromObject(grp), ctr = bb.getCenter(V3(0, 0, 0)), sz = bb.getSize(V3(0, 0, 0));
+const rad = Math.max(sz.x, sz.z) * 0.62 + 0.8;
+const disc = new THREE.Mesh(new THREE.CylinderGeometry(rad * 1.35, rad * 1.35, 0.3, 72), mat(0x182231));
+disc.position.set(ctr.x, -0.15, ctr.z); disc.receiveShadow = true; S.add(disc);
+const grid = new THREE.GridHelper(rad * 2.7, 24, 0x2a3a52, 0x1d2a3d); grid.position.set(ctr.x, 0.02, ctr.z); S.add(grid);
+const ringM = new THREE.Mesh(new THREE.RingGeometry(rad, rad + 0.25, 72), new THREE.MeshBasicMaterial({ color: SCOL.ok, side: 2, transparent: true }));
+ringM.rotation.x = -Math.PI / 2; ringM.position.set(ctr.x, 0.05, ctr.z); S.add(ringM);
+const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 1.3, 8), mat(0x6b7280)); pole.position.set(ctr.x, bb.max.y + 0.65, ctr.z); S.add(pole);
+const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.42, 16, 12), new THREE.MeshBasicMaterial({ color: SCOL.ok })); lamp.position.set(ctr.x, bb.max.y + 1.6, ctr.z); S.add(lamp); lamp.visible = false; pole.visible = false;
+const xm = new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true, transparent: true, opacity: 0.75 });
+grp.traverse(o => { if (o.isMesh) o.userData.m0 = o.material; });
+const core3 = new THREE.Mesh(new THREE.SphereGeometry(0.7, 20, 14), new THREE.MeshBasicMaterial({ color: 0x34d399, transparent: true, opacity: 0.9 }));
+core3.position.copy(ctr); core3.visible = false; S.add(core3);
+let xray = false, status = 'ok', showTags = true, showPower = true;
+function setX(on) { xray = on; grp.traverse(o => { if (o.isMesh && o.userData.m0) o.material = on ? xm : o.userData.m0; }); core3.visible = on; }
+
+P.setLamps('ok');
+const fill = new THREE.PointLight(0x9fc4ff, 0.6, 60); fill.position.set(ctr.x - 10, 9, ctr.z + 8); S.add(fill);
+const R0 = Math.max(sz.x, sz.y, sz.z);
+cam.position.set(ctr.x + R0 * 0.8, ctr.y + R0 * 0.6 + 1.4, ctr.z + R0 * 1.0);
+OC.target.copy(ctr);
+OC.maxDistance = R0 * 7;
+
+let W = 1, H = 1;
+const pj = V3(0, 0, 0);
+function place(el, v) {
+  pj.copy(v).project(cam);
+  el.style.display = pj.z < 1 ? '' : 'none';
+  el.style.transform = 'translate(' + ((pj.x * 0.5 + 0.5) * W).toFixed(1) + 'px,' + ((-pj.y * 0.5 + 0.5) * H).toFixed(1) + 'px) translate(-50%,-100%)';
+}
+new ResizeObserver(() => { W = stg.clientWidth; H = stg.clientHeight; R.setSize(W, H, false); cam.aspect = W / H; cam.updateProjectionMatrix(); }).observe(stg);
+W = stg.clientWidth; H = stg.clientHeight; R.setSize(W, H, false); cam.aspect = W / H; cam.updateProjectionMatrix();
+
+// floating readings: sensor tags on the front, power tags round the back
+const chips = [];
+const DOT = { ok: '#1d9e75', near: '#ef9f27', out: '#e24b4a' };
+function build(list, kind) {
+  chips.filter(c => c.kind === kind).forEach(c => { c.el.remove(); chips.splice(chips.indexOf(c), 1); });
+  const n = list.length, r = rad * 0.72 + 1.0;
+  list.forEach((t, i) => {
+    const a = kind === 'tag' ? (-1.15 + (n < 2 ? 1.15 : (i * 2.3) / (n - 1))) : (Math.PI + 0.9 - (n < 2 ? 0.9 : (i * 1.8) / (n - 1)));
+    const lvl = kind === 'tag' ? 0.1 + 0.8 * ((i * 0.618) % 1) : 0.25 + 0.4 * (i % 2);
+    const el = document.createElement('div');
+    el.className = 'chip';
+    el.innerHTML = '<i></i><span class="t"></span><span class="v"></span>';
+    lab.appendChild(el);
+    chips.push({ el, kind, anchor: V3(ctr.x + r * Math.sin(a), bb.min.y + sz.y * lvl + 0.8, ctr.z + r * Math.cos(a)) });
+    paint(chips[chips.length - 1], t);
+  });
+}
+function paint(c, t) {
+  c.el.children[0].style.background = c.kind === 'pwr' ? '#7a6ad8' : DOT[t.state] || DOT.ok;
+  c.el.children[1].textContent = t.name;
+  c.el.children[2].textContent = t.value;
+  c.el.children[2].className = 'v' + (t.state === 'out' ? ' s' : '');
+}
+function setList(list, kind) {
+  const mine = chips.filter(c => c.kind === kind);
+  if (mine.length !== list.length) build(list, kind); else mine.forEach((c, i) => paint(c, list[i]));
+}
+setList((sd.t || []).map(t => ({ name: t[0], value: t[1].toFixed(t[4]) + ' ' + t[3], state: 'ok' })), 'tag');
+
+window.addEventListener('message', e => {
+  const d = e.data;
+  if (!d || d.type !== 'STUDIO') return;
+  if ('xray' in d) setX(!!d.xray);
+  if ('showTags' in d) showTags = !!d.showTags;
+  if ('showPower' in d) showPower = !!d.showPower;
+  if (d.tags) setList(d.tags, 'tag');
+  if (d.power) setList(d.power, 'pwr');
+  if (d.status) {
+    status = d.status;
+    P.running = d.status !== 'stopped';
+    P.setLamps(d.status);
+    const c = d.status === 'stopped' ? SCOL.stop : d.status === 'attention' ? SCOL.warn : SCOL.ok;
+    ringM.material.color.set(c); lamp.material.color.set(c);
+  }
+  if ('rotate' in d) OC.autoRotate = !!d.rotate;
+});
+
+const clk = new THREE.Clock();
+let tm = 0;
+(function loop() {
+  requestAnimationFrame(loop);
+  const dtm = Math.min(clk.getDelta(), 0.05);
+  tm += dtm;
+  P.update(tm, dtm);
+  OC.update();
+  if (status !== 'ok') ringM.material.opacity = 0.55 + 0.45 * Math.abs(Math.sin(tm * 3)); else ringM.material.opacity = 1;
+  if (xray) core3.position.y = ctr.y + Math.sin(tm * 2.2) * sz.y * 0.28;
+  chips.forEach(c => { c.el.style.visibility = (c.kind === 'tag' ? showTags : showPower) ? '' : 'hidden'; place(c.el, c.anchor); });
+  R.render(S, cam);
+})();
+try { parent.postMessage({ type: 'STUDIO_READY', id: sd.id }, '*'); } catch (e) {}
+</script>
+</body>
+</html>
