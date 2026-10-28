@@ -1,5 +1,7 @@
 # BatteryIQ: AI vision inspection for a vehicle battery plant
 
+https://battery-iq-pi.vercel.app/
+
 A demo by JoulesToWatts for an Exide-style lead-acid vehicle battery line. Every battery goes through four AI
 vision gates, and everything on screen (gate cards, defect counts, SPC, review queue, hold bay, alarms, shift
 figures, traces, the copilot) is computed from the same seeded list of batteries, so the numbers always agree.
